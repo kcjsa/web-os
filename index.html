@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>Browser Linux OS</title>
+<style>
+  body { margin:0; background:#000; color:#0f0; font-family:monospace; }
+  #terminal { padding:10px; white-space:pre; height:90vh; overflow-y:auto; }
+  input { position:fixed; bottom:0; width:100%; background:#000; color:#0f0; border:none; outline:none; font-family:monospace; }
+</style>
+</head>
+<body>
+<div id="terminal"></div>
+<input id="input" autofocus placeholder="Type commands...">
+<script>
+const term = document.getElementById("terminal");
+const input = document.getElementById("input");
+
+// 設定管理
+const config = {
+  load(){ return JSON.parse(localStorage.getItem("osConfig") || "{}"); },
+  save(data){ localStorage.setItem("osConfig", JSON.stringify(data)); }
+};
+let osConfig = config.load();
+
+// RAM仮想FS
+const virtualFS = {
+  fs: { "/": {} },
+  list(path="/"){ return Object.keys(this.fs[path]||{}).join(" "); },
+  read(path){ return this.fs[path]?.content || "No such file"; },
+  write(path, content){ this.fs[path] = { content }; },
+  mkdir(path){ this.fs[path] = {}; }
+};
+
+// SSDフォルダ handles
+let diskHandle = null;
+let swapHandle = null;
+
+// ユーザーが1つのフォルダ選択 → 内部で disk/swap 作成
+async function pickRootFolder(){
+    const rootHandle = await window.showDirectoryPicker();
+    diskHandle = await rootHandle.getDirectoryHandle("disk", { create: true });
+    swapHandle = await rootHandle.getDirectoryHandle("swap", { create: true });
+    draw("Disk and Swap folders created inside selected folder.");
+}
+
+// RAM使用量監視とswap退避
+async function checkRamAndSwap(){
+    const used = performance.memory ? performance.memory.usedJSHeapSize : 0;
+    const MAX_RAM = 1.4*1024*1024*1024;
+    if(used > MAX_RAM*0.9 && swapHandle){
+        for(const path in virtualFS.fs){
+            const content = virtualFS.read(path);
+            const fileHandle = await swapHandle.getFileHandle(path, { create:true });
+            const writable = await fileHandle.createWritable();
+            await writable.write(content);
+            await writable.close();
+            delete virtualFS.fs[path];
+            draw(`Swapped ${path} to swap folder.`);
+        }
+    }
+}
+
+// コマンド実装（主要31コマンドの一部例）
+async function executeCommand(inputStr){
+    const [cmd, ...args] = inputStr.trim().split(" ");
+    switch(cmd){
+        case "ls": return virtualFS.list();
+        case "cat": return virtualFS.read(args[0]);
+        case "mkdir": virtualFS.mkdir(args[0]); return;
+        case "touch": virtualFS.write(args[0],""); return;
+        case "rm": delete virtualFS.fs[args[0]]; return;
+        case "echo": return args.join(" ");
+        case "pwd": return "/";
+        case "clear": term.textContent=""; return;
+        case "help": return "Commands: ls, cat, mkdir, rm, touch, echo, pwd, clear, reboot, diskls, diskcat, pickdisk, ramusage, ...";
+        case "reboot":
+            virtualFS.fs={"/":{}}; draw("System rebooted!"); return;
+        case "pickdisk":
+            await pickRootFolder(); return;
+        case "diskls":
+            if(!diskHandle) return "Disk folder not selected";
+            const files=[];
+            for await(const [name] of diskHandle.entries()){ files.push(name); }
+            return files.join(" ");
+        case "diskcat":
+            if(!diskHandle) return "Disk folder not selected";
+            if(!args[0]) return "Specify file";
+            const fileHandle = await diskHandle.getFileHandle(args[0]);
+            const file = await fileHandle.getFile();
+            return await file.text();
+        case "ramusage":
+            return "RAM usage: approx "+(performance.memory?Math.round(performance.memory.usedJSHeapSize/1024/1024):"N/A")+" MB";
+        default: return cmd+": command not found";
+    }
+}
+
+// 表示補助
+function draw(text){ term.textContent += text+"\n"; term.scrollTop = term.scrollHeight; }
+
+// 入力処理
+input.addEventListener("keydown", async(e)=>{
+  if(e.key==="Enter"){
+    const cmd = input.value;
+    draw("> "+cmd);
+    input.value="";
+    const res = await executeCommand(cmd);
+    if(res!==undefined) draw(res);
+    await checkRamAndSwap();
+  }
+});
+
+draw("Browser Linux OS (sh) ready. Type 'help'. Use 'pickdisk' to select folder.");
+</script>
+</body>
+</html>
