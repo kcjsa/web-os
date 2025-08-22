@@ -23,28 +23,60 @@ const config = {
 };
 let osConfig = config.load();
 
-// RAM仮想FS
+// RAM仮想FS（多階層対応）
 const virtualFS = {
   fs: { "/": {} },
-  list(path="/"){ return Object.keys(this.fs[path]||{}).join(" "); },
-  read(path){ return this.fs[path]?.content || "No such file"; },
-  write(path, content){ this.fs[path] = { content }; },
-  mkdir(path){ this.fs[path] = {}; }
+
+  _getNode(path, create=false){
+    const parts = path.split("/").filter(p=>p);
+    let node = this.fs["/"];
+    for(const part of parts){
+      if(!node[part]){
+        if(create) node[part]={};
+        else return null;
+      }
+      node = node[part];
+    }
+    return node;
+  },
+
+  mkdir(path){ this._getNode(path, true); },
+
+  list(path="/"){
+    const node = this._getNode(path);
+    if(!node) return "No such directory";
+    return Object.keys(node).join(" ");
+  },
+
+  write(path, content){
+    const parts = path.split("/").filter(p=>p);
+    const fileName = parts.pop();
+    const dir = this._getNode(parts.join("/"), true);
+    dir[fileName] = { content };
+  },
+
+  read(path){
+    const parts = path.split("/").filter(p=>p);
+    const fileName = parts.pop();
+    const dir = this._getNode(parts.join("/"));
+    if(!dir || !dir[fileName] || !dir[fileName].content) return "No such file";
+    return dir[fileName].content;
+  }
 };
 
 // SSDフォルダ handles
 let diskHandle = null;
 let swapHandle = null;
 
-// ユーザーが1つのフォルダ選択 → 内部で disk/swap 作成
+// フォルダ選択 → disk / swap 自動作成
 async function pickRootFolder(){
     const rootHandle = await window.showDirectoryPicker();
-    diskHandle = await rootHandle.getDirectoryHandle("disk", { create: true });
-    swapHandle = await rootHandle.getDirectoryHandle("swap", { create: true });
+    diskHandle = await rootHandle.getDirectoryHandle("disk", { create:true });
+    swapHandle = await rootHandle.getDirectoryHandle("swap", { create:true });
     draw("Disk and Swap folders created inside selected folder.");
 }
 
-// RAM使用量監視とswap退避
+// RAM使用量監視 → swap退避
 async function checkRamAndSwap(){
     const used = performance.memory ? performance.memory.usedJSHeapSize : 0;
     const MAX_RAM = 1.4*1024*1024*1024;
@@ -61,21 +93,28 @@ async function checkRamAndSwap(){
     }
 }
 
-// コマンド実装（主要31コマンドの一部例）
+// コマンド実装
 async function executeCommand(inputStr){
     const [cmd, ...args] = inputStr.trim().split(" ");
     switch(cmd){
-        case "ls": return virtualFS.list();
+        case "ls": return virtualFS.list(args[0]||"/");
         case "cat": return virtualFS.read(args[0]);
         case "mkdir": virtualFS.mkdir(args[0]); return;
         case "touch": virtualFS.write(args[0],""); return;
-        case "rm": delete virtualFS.fs[args[0]]; return;
+        case "rm":
+            const parts = args[0].split("/").filter(p=>p);
+            const fileName = parts.pop();
+            const dir = virtualFS._getNode(parts.join("/"));
+            if(dir && dir[fileName]) delete dir[fileName];
+            return;
         case "echo": return args.join(" ");
         case "pwd": return "/";
         case "clear": term.textContent=""; return;
-        case "help": return "Commands: ls, cat, mkdir, rm, touch, echo, pwd, clear, reboot, diskls, diskcat, pickdisk, ramusage, ...";
+        case "help": return "Commands: ls, cat, mkdir, touch, rm, echo, pwd, clear, reboot, diskls, diskcat, pickdisk, ramusage";
         case "reboot":
-            virtualFS.fs={"/":{}}; draw("System rebooted!"); return;
+            draw("System rebooting...");
+            setTimeout(() => location.reload(), 500);
+            return;
         case "pickdisk":
             await pickRootFolder(); return;
         case "diskls":
